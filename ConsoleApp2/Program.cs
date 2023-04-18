@@ -1,13 +1,16 @@
 ﻿using Bogus;
 using System.Data;
 using System.Data.SqlClient;
+using System.Linq;
+using System.Net;
 
 namespace ConsoleApp1
 {
     class Program
     {
         static List<string> TABLE_TO_SKIP = new List<string> { "__EFMigrationsHistory", "GeneralSettings", "Bancos", "Convenios" };
-        static List<string> COLUMNS_TO_SKIP = new List<string> { "id", "creationdate", "creationuser", "changedate", "changeuser", "isactive", "masterid", "bancos" };
+        static List<string> COLUMNS_TO_SKIP = new List<string> { "id", "creationdate", "creationuser", "changedate", "changeuser", "isactive", "masterid" };
+        static List<string> SCHEMAS = new List<string> { "'basic'" };
 
         static Dictionary<string, Type> _typeAlias = new Dictionary<string, Type> {
             {  "bit" , typeof(bool)},
@@ -21,6 +24,7 @@ namespace ConsoleApp1
             {  "string" ,typeof(string)},
             {  "varchar",typeof(string) },
             {  "nvarchar",typeof(string) },
+            {  "varbinary",typeof(byte[]) },
             {  "date",typeof(DateTime) },
             {  "datetimeoffset",typeof(DateTime) },
             {  "datetime",typeof(DateTime) },
@@ -30,13 +34,13 @@ namespace ConsoleApp1
         static async Task Main(string[] args)
         {
             // Conexão com o banco de dados
-            var connectionString = "Server=ITLNB057;Database=ITLabSafraMutuo;Trusted_Connection=True;MultipleActiveResultSets=true";
+            var connectionString = "Server=ITLNB057;Database=Template.Version2;Trusted_Connection=True;MultipleActiveResultSets=true";
             using var connection = new SqlConnection(connectionString);
             await connection.OpenAsync();
 
             // Consulta as tabelas do banco de dados
             var tables = new List<string>();
-            using var command = new SqlCommand("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = 'dbo' ORDER BY TABLE_NAME", connection);
+            using var command = new SqlCommand($"SELECT TABLE_SCHEMA + '.' + TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA IN ({string.Join(",", SCHEMAS)}) ORDER BY TABLE_NAME", connection);
             using var reader = await command.ExecuteReaderAsync();
             while (await reader.ReadAsync())
             {
@@ -59,7 +63,8 @@ namespace ConsoleApp1
 
             var columns = new List<DataColumn>();
             var PKColumns = new Dictionary<string, string>();
-            using var schemaCommand = new SqlCommand($"SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{tableName}'", connection);
+            var columnsQuery = $"SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA + '.' + TABLE_NAME = '{tableName}'";
+            using var schemaCommand = new SqlCommand(columnsQuery, connection);
             using var schemaReader = await schemaCommand.ExecuteReaderAsync();
             while (await schemaReader.ReadAsync())
             {
@@ -88,7 +93,7 @@ namespace ConsoleApp1
 
             schemaReader.Close();
 
-            var selectQuery = $"SELECT KU.COLUMN_NAME, KU.TABLE_NAME, KU.CONSTRAINT_NAME, " +
+            var selectQuery = $"SELECT KU.COLUMN_NAME, KU.TABLE_SCHEMA + '.' + KU.TABLE_NAME, KU.CONSTRAINT_NAME, " +
                               $"KU2.COLUMN_NAME AS REFERENCED_COLUMN_NAME, " +
                               $"KU2.TABLE_NAME AS REFERENCED_TABLE_NAME " +
                               $"FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE KU " +
@@ -143,12 +148,16 @@ namespace ConsoleApp1
 
                         if(column.ColumnName.ToUpper().Contains("NOME"))
                             stringValue = faker.Name.FullName().Replace("'", "*").Replace(",", "*");
+                        else if (column.ColumnName.ToUpper().Contains("EXTENSION"))
+                            stringValue = faker.System.CommonFileExt();
+                        else if (column.ColumnName.ToUpper().Contains("FILENAME"))
+                            stringValue = Path.GetFileNameWithoutExtension(faker.System.CommonFileName());
                         else if (column.ColumnName.ToUpper().Contains("ISS") ||
                                  column.ColumnName.ToUpper().Contains("CNPJ") ||
                                  column.ColumnName.ToUpper().Contains("CPF"))
                             stringValue = faker.Random.Int(0,int.MaxValue).ToString().Replace("'", "*").Replace(",", "*");
                         else
-                            stringValue = faker.Lorem.Text().Replace("'", "*").Replace(",", "*");
+                            stringValue = faker.WaffleText(faker.Random.Int(1, 10)).Replace("'", "*").Replace(",", "*");
 
                         var columnLength = column.MaxLength <= 0 ? 1 : column.MaxLength;
                         if (stringValue.Length > columnLength)
@@ -181,12 +190,21 @@ namespace ConsoleApp1
                     {
                         row[column] = faker.Random.Bool();
                     }
+                    else if (column.DataType == typeof(byte[]))
+                    {
+                        var imageUrl = faker.Image.PlaceImgUrl();
+                        using (var webClient = new WebClient())
+                        {
+                            var imageBytes = webClient.DownloadData(imageUrl);
+                            row[column] = imageBytes;
+                        }
+                    }
                 }
                 dataTable.Rows.Add(row);
             }
 
             // Monta o script de inserção
-            var insertQuery = $"INSERT INTO {tableName} ({string.Join(", ", columns.Select(c => c.ColumnName))}) VALUES ";
+            var insertQuery = $"INSERT INTO {tableName} ({string.Join(", ", columns.Select(c => $"[{c.ColumnName}]"))}) VALUES ";
             for (int i = 0; i < dataTable.Rows.Count; i++)
             {
                 var rowValues = new List<string>();
@@ -200,6 +218,11 @@ namespace ConsoleApp1
                     else if (column.DataType == typeof(string) || column.DataType == typeof(DateTime) || column.DataType == typeof(bool))
                     {
                         rowValues.Add($"'{value}'");
+                    }
+                    else if (column.DataType == typeof(byte[]))
+                    {
+                        byte[] byteArray = value as byte[];
+                        rowValues.Add($"CAST('{Convert.ToBase64String(byteArray)}' AS VARBINARY(MAX))");
                     }
                     else
                     {
