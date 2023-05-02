@@ -36,7 +36,7 @@ namespace ConsoleApp1
         {
             // Conexão com o banco de dados
             //
-            //var connectionString = "";
+            var connectionString = "";
             
             using var connection = new SqlConnection(connectionString);
             await connection.OpenAsync();
