@@ -10,7 +10,7 @@ namespace ConsoleApp1
         static List<string> TABLE_TO_SKIP = new List<string> { "dbo.__EFMigrationsHistory", "dbo.GeneralSettings", "dbo.Bancos", "dbo.Convenios", "dbo.Robos", "dbo.RobosFluxo", "dbo.TipoConta" };
         static List<string> COLUMNS_TO_SKIP = new List<string> { "id", "creationdate", "creationuser", "changedate", "changeuser", "isactive", "masterid" };
         static List<string> SCHEMAS = new List<string> { "'basic', 'dbo'" };
-        static int NUMER_OF_ITEMS = 100;
+        static int NUMER_OF_ITEMS = 10;
         static bool APPEND_DATA = false;
 
         static Dictionary<string, Type> _typeAlias = new Dictionary<string, Type> {
@@ -36,7 +36,7 @@ namespace ConsoleApp1
         {
             // Conexão com o banco de dados
             //
-            var connectionString = "";
+            //var connectionString = "";
             
             using var connection = new SqlConnection(connectionString);
             await connection.OpenAsync();
@@ -57,7 +57,11 @@ namespace ConsoleApp1
                 var count = await GetTableCount(connection, tableName);
 
                 if (count > 0 && !APPEND_DATA)
+                {
+                    Console.WriteLine($"{tableName} already has data. Ignoring.");
                     continue;
+                }
+                    
                 
                 if (!TABLE_TO_SKIP.Any(x => x.ToUpper() == tableName.ToUpper()))
                     await HandleTable(connection, tableName);
@@ -66,6 +70,7 @@ namespace ConsoleApp1
 
         private static async Task HandleTable(SqlConnection connection, string tableName)
         {
+            Console.WriteLine($"Start {tableName}");
             // Configuração do Faker
             var faker = new Faker("pt_BR");
 
@@ -101,34 +106,9 @@ namespace ConsoleApp1
 
             schemaReader.Close();
 
-            var selectQuery = $"SELECT KU.COLUMN_NAME, KU.TABLE_SCHEMA + '.' + KU.TABLE_NAME, KU.CONSTRAINT_NAME, " +
-                              $"KU2.COLUMN_NAME AS REFERENCED_COLUMN_NAME, " +
-                              $"KU2.TABLE_SCHEMA + '.' + KU2.TABLE_NAME AS REFERENCED_TABLE_NAME " +
-                              $"FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE KU " +
-                              $"INNER JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS RC ON KU.CONSTRAINT_NAME = RC.CONSTRAINT_NAME " +
-                              $"INNER JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE KU2 ON RC.UNIQUE_CONSTRAINT_NAME = KU2.CONSTRAINT_NAME " +
-                              $"WHERE KU.TABLE_SCHEMA + '.' + KU.TABLE_NAME = '{tableName}' AND KU.CONSTRAINT_NAME LIKE 'FK_%'";
-            using var selectCommand = new SqlCommand(selectQuery, connection);
-            using var foreignKeyReader = await selectCommand.ExecuteReaderAsync();
-
-            while (await foreignKeyReader.ReadAsync())
-            {
-                var columnName = foreignKeyReader.GetString(foreignKeyReader.GetOrdinal("COLUMN_NAME"));
-                var referencedTableName = foreignKeyReader.GetString(foreignKeyReader.GetOrdinal("REFERENCED_TABLE_NAME"));
-                var referencedColumnName = foreignKeyReader.GetString(foreignKeyReader.GetOrdinal("REFERENCED_COLUMN_NAME"));
-
-                if (tableName == referencedTableName)
-                    continue;
-
-                // Verifica se há dados na tabela referenciada
-                var count = await GetTableCount(connection, tableName);
-                if (count == 0 && !TABLE_TO_SKIP.Any(x => x == tableName))
-                {
-                    // Adicionar Dados
-                    await HandleTable(connection, referencedTableName);
-                }
-                PKColumns.Add(columnName, referencedTableName);
-            }
+            var dictPKResult = await HandleChildrens(connection, tableName);
+            foreach (var item in dictPKResult)
+                PKColumns.Add(item.Key, item.Value);
 
             // Gera os dados fictícios
             var dataTable = new DataTable(tableName);
@@ -138,6 +118,7 @@ namespace ConsoleApp1
             }
             for (int i = 0; i < NUMER_OF_ITEMS; i++)
             {
+                //Console.WriteLine($"Add item {i} to {tableName}");
                 var row = dataTable.NewRow();
                 foreach (var column in columns)
                 {
@@ -172,13 +153,15 @@ namespace ConsoleApp1
                     }
                     else if (column.DataType == typeof(int))
                     {
-                        if (PKColumns.TryGetValue(column.ColumnName, out var tablename))
+                        if (PKColumns.TryGetValue(column.ColumnName, out var pkTableName))
                         {
                             var count = await GetTableCount(connection, tableName);
-                            if(count == 0)
-                                await HandleTable(connection, tableName);
+                            if (count == 0)
+                            {
+                                await HandleTable(connection, pkTableName);
+                            }
 
-                            var pkquery = $"SELECT TOP 1 Id FROM {tablename} ORDER BY NEWID()";
+                            var pkquery = $"SELECT TOP 1 Id FROM {pkTableName} ORDER BY NEWID()";
                             using var pkCommand = new SqlCommand(pkquery, connection);
                             var pkId = (int)await pkCommand.ExecuteScalarAsync();
                             row[column] = pkId;
@@ -246,7 +229,43 @@ namespace ConsoleApp1
             using var insertCommand = new SqlCommand(insertQuery, connection);
             await insertCommand.ExecuteScalarAsync();
 
-            Console.WriteLine(tableName);
+            //Console.WriteLine($"Finish {tableName}");
+        }
+
+        private static async Task<Dictionary<string, string>> HandleChildrens(SqlConnection connection, string tableName)
+        {
+            var PKColumns = new Dictionary<string, string>();
+
+            var selectQuery = $"SELECT KU.COLUMN_NAME, KU.TABLE_SCHEMA + '.' + KU.TABLE_NAME, KU.CONSTRAINT_NAME, " +
+                              $"KU2.COLUMN_NAME AS REFERENCED_COLUMN_NAME, " +
+                              $"KU2.TABLE_SCHEMA + '.' + KU2.TABLE_NAME AS REFERENCED_TABLE_NAME " +
+                              $"FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE KU " +
+                              $"INNER JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS RC ON KU.CONSTRAINT_NAME = RC.CONSTRAINT_NAME " +
+                              $"INNER JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE KU2 ON RC.UNIQUE_CONSTRAINT_NAME = KU2.CONSTRAINT_NAME " +
+                              $"WHERE KU.TABLE_SCHEMA + '.' + KU.TABLE_NAME = '{tableName}' AND KU.CONSTRAINT_NAME LIKE 'FK_%'";
+            using var selectCommand = new SqlCommand(selectQuery, connection);
+            using var foreignKeyReader = await selectCommand.ExecuteReaderAsync();
+
+            while (await foreignKeyReader.ReadAsync())
+            {
+                var columnName = foreignKeyReader.GetString(foreignKeyReader.GetOrdinal("COLUMN_NAME"));
+                var referencedTableName = foreignKeyReader.GetString(foreignKeyReader.GetOrdinal("REFERENCED_TABLE_NAME"));
+                var referencedColumnName = foreignKeyReader.GetString(foreignKeyReader.GetOrdinal("REFERENCED_COLUMN_NAME"));
+
+                if (tableName == referencedTableName)
+                    continue;
+
+                // Verifica se há dados na tabela referenciada
+                var count = await GetTableCount(connection, tableName);
+                if (count == 0 && !TABLE_TO_SKIP.Any(x => x == tableName))
+                {
+                    // Adicionar Dados
+                    await HandleTable(connection, referencedTableName);
+                }
+                PKColumns.Add(columnName, referencedTableName);
+            }
+
+            return PKColumns;
         }
 
         private static async Task<int> GetTableCount(SqlConnection connection, string tableName)
