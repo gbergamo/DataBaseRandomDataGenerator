@@ -1,16 +1,17 @@
 ﻿using Bogus;
 using System.Data;
 using System.Data.SqlClient;
-using System.Linq;
 using System.Net;
 
 namespace ConsoleApp1
 {
     class Program
     {
-        static List<string> TABLE_TO_SKIP = new List<string> { "__EFMigrationsHistory", "GeneralSettings", "Bancos", "Convenios" };
+        static List<string> TABLE_TO_SKIP = new List<string> { "dbo.__EFMigrationsHistory", "dbo.GeneralSettings", "dbo.Bancos", "dbo.Convenios", "dbo.Robos", "dbo.RobosFluxo", "dbo.TipoConta" };
         static List<string> COLUMNS_TO_SKIP = new List<string> { "id", "creationdate", "creationuser", "changedate", "changeuser", "isactive", "masterid" };
-        static List<string> SCHEMAS = new List<string> { "'basic'" };
+        static List<string> SCHEMAS = new List<string> { "'basic', 'dbo'" };
+        static int NUMER_OF_ITEMS = 100;
+        static bool APPEND_DATA = false;
 
         static Dictionary<string, Type> _typeAlias = new Dictionary<string, Type> {
             {  "bit" , typeof(bool)},
@@ -34,7 +35,9 @@ namespace ConsoleApp1
         static async Task Main(string[] args)
         {
             // Conexão com o banco de dados
-            var connectionString = "Server=ITLNB057;Database=Template.Version2;Trusted_Connection=True;MultipleActiveResultSets=true";
+            //
+            var connectionString = "";
+            
             using var connection = new SqlConnection(connectionString);
             await connection.OpenAsync();
 
@@ -51,6 +54,11 @@ namespace ConsoleApp1
             // Loop pelas tabelas e colunas e gera os dados fictícios
             foreach (var tableName in tables)
             {
+                var count = await GetTableCount(connection, tableName);
+
+                if (count > 0 && !APPEND_DATA)
+                    continue;
+                
                 if (!TABLE_TO_SKIP.Any(x => x.ToUpper() == tableName.ToUpper()))
                     await HandleTable(connection, tableName);
             }
@@ -95,11 +103,11 @@ namespace ConsoleApp1
 
             var selectQuery = $"SELECT KU.COLUMN_NAME, KU.TABLE_SCHEMA + '.' + KU.TABLE_NAME, KU.CONSTRAINT_NAME, " +
                               $"KU2.COLUMN_NAME AS REFERENCED_COLUMN_NAME, " +
-                              $"KU2.TABLE_NAME AS REFERENCED_TABLE_NAME " +
+                              $"KU2.TABLE_SCHEMA + '.' + KU2.TABLE_NAME AS REFERENCED_TABLE_NAME " +
                               $"FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE KU " +
                               $"INNER JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS RC ON KU.CONSTRAINT_NAME = RC.CONSTRAINT_NAME " +
                               $"INNER JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE KU2 ON RC.UNIQUE_CONSTRAINT_NAME = KU2.CONSTRAINT_NAME " +
-                              $"WHERE KU.TABLE_NAME = '{tableName}' AND KU.CONSTRAINT_NAME LIKE 'FK_%'";
+                              $"WHERE KU.TABLE_SCHEMA + '.' + KU.TABLE_NAME = '{tableName}' AND KU.CONSTRAINT_NAME LIKE 'FK_%'";
             using var selectCommand = new SqlCommand(selectQuery, connection);
             using var foreignKeyReader = await selectCommand.ExecuteReaderAsync();
 
@@ -113,9 +121,7 @@ namespace ConsoleApp1
                     continue;
 
                 // Verifica se há dados na tabela referenciada
-                var countQuery = $"SELECT COUNT(*) FROM {referencedTableName}";
-                using var countCommand = new SqlCommand(countQuery, connection);
-                var count = (int)await countCommand.ExecuteScalarAsync();
+                var count = await GetTableCount(connection, tableName);
                 if (count == 0 && !TABLE_TO_SKIP.Any(x => x == tableName))
                 {
                     // Adicionar Dados
@@ -130,7 +136,7 @@ namespace ConsoleApp1
             {
                 dataTable.Columns.Add(column);
             }
-            for (int i = 0; i < 10; i++)
+            for (int i = 0; i < NUMER_OF_ITEMS; i++)
             {
                 var row = dataTable.NewRow();
                 foreach (var column in columns)
@@ -168,6 +174,10 @@ namespace ConsoleApp1
                     {
                         if (PKColumns.TryGetValue(column.ColumnName, out var tablename))
                         {
+                            var count = await GetTableCount(connection, tableName);
+                            if(count == 0)
+                                await HandleTable(connection, tableName);
+
                             var pkquery = $"SELECT TOP 1 Id FROM {tablename} ORDER BY NEWID()";
                             using var pkCommand = new SqlCommand(pkquery, connection);
                             var pkId = (int)await pkCommand.ExecuteScalarAsync();
@@ -237,6 +247,25 @@ namespace ConsoleApp1
             await insertCommand.ExecuteScalarAsync();
 
             Console.WriteLine(tableName);
+        }
+
+        private static async Task<int> GetTableCount(SqlConnection connection, string tableName)
+        {
+            try
+            {
+                var countQuery = $"SELECT COUNT(1) FROM {tableName}";
+                using var countCommand = new SqlCommand(countQuery, connection);
+                var result = await countCommand.ExecuteScalarAsync();
+
+                if (result != null && int.TryParse(result.ToString(), out int countResult))
+                    return countResult;
+
+                throw new Exception($"Error getting count from {tableName}");
+            }
+            catch (Exception)
+            {
+                throw;
+            }
         }
     }
 }
